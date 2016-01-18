@@ -1,76 +1,87 @@
--- Idea by https://github.com/asdofindia/telegram-bot/
--- See http://api.giphy.com/
+local NUM_MSG_MAX = 5 -- Max number of messages per TIME_CHECK seconds
+local TIME_CHECK = 5
 
-do
-
-local BASE_URL = 'http://api.giphy.com/v1'
-local API_KEY = 'dc6zaTOxFJmzC' -- public beta key
-
-local function get_image(response)
-  local images = json:decode(response).data
-  if #images == 0 then return nil end -- No images
-  local i = math.random(#images)
-  local image =  images[i] -- A random one
-
-  if image.images.downsized then
-    return image.images.downsized.url
-  end
-
-  if image.images.original then
-    return image.original.url
-  end
-
-  return nil
+local function kick_user(user_id, chat_id)
+  local chat = 'chat#id'..chat_id
+  local user = 'user#id'..user_id
+  chat_del_user(chat, user, function (data, success, result)
+    if success ~= 1 then
+      local text = 'I can\'t kick '..data.user..' but should be kicked'
+      send_msg(data.chat, '', ok_cb, nil)
+    end
+  end, {chat=chat, user=user})
 end
 
-local function get_random_top()
-  local url = BASE_URL.."/gifs/trending?api_key="..API_KEY
-  local response, code = http.request(url)
-  if code ~= 200 then return nil end
-  return get_image(response)
-end
-
-local function search(text)
-  text = URL.escape(text)
-  local url = BASE_URL.."/gifs/search?q="..text.."&api_key="..API_KEY
-  local response, code = http.request(url)
-  if code ~= 200 then return nil end
-  return get_image(response)
-end
-
-local function run(msg, matches)
-  local gif_url = nil
-  
-  -- If no search data, a random trending GIF will be sent
-  if matches[1] == "!gif" or matches[1] == "!giphy" then
-    gif_url = get_random_top()
+local function run (msg, matches)
+  if msg.to.type ~= 'chat' then
+    return 'Anti-flood works only on channels'
   else
-    gif_url = search(matches[1])
+    local chat = msg.to.id
+    local hash = 'anti-flood:enabled:'..chat
+    if matches[1] == 'enable' then
+      redis:set(hash, true)
+      return 'Anti-flood enabled on chat'
+    end
+    if matches[1] == 'disable' then
+      redis:del(hash)
+      return 'Anti-flood disabled on chat'
+    end
+  end
+end
+
+local function pre_process (msg)
+  -- Ignore service msg
+  if msg.service then
+    print('Service message')
+    return msg
   end
 
-  if not gif_url then 
-    return "Error: GIF not found"
-  end
+  local hash_enable = 'anti-flood:enabled:'..msg.to.id
+  local enabled = redis:get(hash_enable)
 
-  local receiver = get_receiver(msg)
-  print("GIF URL"..gif_url)
-  
-  send_document_from_url(receiver, gif_url)
+  if enabled then
+    print('anti-flood enabled')
+    -- Check flood
+    if msg.from.type == 'user' then
+      -- Increase the number of messages from the user on the chat
+      local hash = 'anti-flood:'..msg.from.id..':'..msg.to.id..':msg-num'
+      local msgs = tonumber(redis:get(hash) or 0)
+      if msgs > NUM_MSG_MAX then
+        local receiver = get_receiver(msg)
+        local user = msg.from.id
+        local text = 'User '..user..' is flooding'
+        local chat = msg.to.id
+
+        send_msg(receiver, text, ok_cb, nil)
+        if msg.to.type ~= 'chat' then
+          print("Flood in not a chat group!")
+        elseif user == tostring(our_id) then
+          print('I won\'t kick myself')
+        elseif is_sudo(msg) then
+          print('I won\'t kick an admin!')
+        else
+          -- Ban user
+          -- TODO: Check on this plugin bans
+          local bhash = 'banned:'..msg.to.id..':'..msg.from.id
+          redis:set(bhash, true)
+          kick_user(user, chat)
+        end
+        msg = nil
+      end
+      redis:setex(hash, TIME_CHECK, msgs+1)
+    end
+  end
+  return msg
 end
 
 return {
-  description = "GIFs from telegram with Giphy API",
-  usage = {
-    "!gif (term): Search and sends GIF from Giphy. If no param, sends a trending GIF.",
-    "!giphy (term): Search and sends GIF from Giphy. If no param, sends a trending GIF."
-    },
+  description = 'Plugin to kick flooders from group.',
+  usage = {},
   patterns = {
-    "^!gif$",
-    "^!gif (.*)",
-    "^!giphy (.*)",
-    "^!giphy$"
+    '^!antiflood (enable)$',
+    '^!antiflood (disable)$'
   },
-  run = run
+  run = run,
+  privileged = true,
+  pre_process = pre_process
 }
-
-end
